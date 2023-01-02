@@ -1,0 +1,231 @@
+---
+version: '3'
+services:
+  mysql-inventoryservice:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=12345678
+      - MYSQL_DATABASE=inventoryservice
+    volumes:
+      - ./mysql_inventoryservice_data:/var/lib/mysql
+    networks:
+      - learnmicroservices-network
+
+  mysql-orderservice:
+    image: mysql:8.0
+    volumes:
+      - ./mysql_orderservice_data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=12345678
+      - MYSQL_DATABASE=orderservice
+      - MYSQL_TCP_PORT=3307
+    ports:
+      - "3307:3307"
+    expose:
+      - 3307
+    networks:
+      - learnmicroservices-network
+
+  mysql-keycloakservice:
+    image: mysql:8.0
+    volumes:
+      - ./mysql_keycloakservice_data:/var/lib/mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=12345678
+      - MYSQL_DATABASE=keycloakservice
+      - MYSQL_TCP_PORT=3308
+    ports:
+      - "3308:3308"
+    expose:
+      - 3308
+    networks:
+      - learnmicroservices-network
+
+  keycloak-service:
+    container_name: keycloak
+    image: quay.io/keycloak/keycloak:18.0.0
+    command: [ "start-dev"]
+    environment:
+      DB_VENDOR: MYSQL
+      DB_ADDR: mysql-keycloakservice
+      DB_DATABASE: keycloakservice
+      DB_USER: root
+      DB_PASSWORD: 12345678
+      DB_PORT: 3308
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    networks:
+      - learnmicroservices-network
+    depends_on:
+      - mysql-keycloakservice
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.0.1
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - learnmicroservices-network
+
+  broker:
+    image: confluentinc/cp-kafka:7.0.1
+    container_name: broker
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://broker:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    networks:
+      - learnmicroservices-network
+
+## Zipkin
+  zipkin:
+    image: openzipkin/zipkin
+    container_name: zipkin
+    ports:
+      - "9411:9411"
+    networks:
+      - learnmicroservices-network
+
+  config-server:
+    image: learnmicroservices/config-server:latest
+    container_name: config-server
+    ports:
+      - "8071:8071"
+    depends_on:
+      - zipkin
+    networks:
+      - learnmicroservices-network
+
+## Eureka Server
+  discovery-server:
+      image: learnmicroservices/discovery-server:latest
+      container_name: discovery-server
+      ports:
+        - "8761:8761"
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      depends_on:
+        - zipkin
+      networks:
+        - learnmicroservices-network
+
+  api-gateway:
+      image: learnmicroservices/api-gateway:latest
+      container_name: api-gateway
+      ports:
+        - "8181:8080"
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      expose:
+        - "8181"
+      depends_on:
+        - zipkin
+        - discovery-server
+      networks:
+        - learnmicroservices-network
+
+## Product-Service Docker Compose Config
+  product-service:
+      container_name: product-service
+      image: learnmicroservices/product-service:latest
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      depends_on:
+        - discovery-server
+        - api-gateway
+      networks:
+        - learnmicroservices-network
+
+    ## Order-Service Docker Compose Config
+  order-service:
+      container_name: order-service
+      image: learnmicroservices/order-service:latest
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      depends_on:
+        - broker
+        - zipkin
+        - discovery-server
+        - api-gateway
+        - mysql-orderservice
+      networks:
+        - learnmicroservices-network
+
+    ## Inventory-Service Docker Compose Config
+  inventory-service:
+      container_name: inventory-service
+      image: learnmicroservices/inventory-service:latest
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      depends_on:
+        - discovery-server
+        - api-gateway
+        - mysql-inventoryservice
+      networks:
+        - learnmicroservices-network
+
+    ## Notification-Service Docker Compose Config
+  notification-service:
+      container_name: notification-service
+      image: learnmicroservices/notification-service:latest
+      environment:
+        - SPRING_PROFILES_ACTIVE=docker
+        - SPRING_CONFIG_IMPORT=configserver:http://config-server:8071/
+      depends_on:
+        - zipkin
+        - broker
+        - discovery-server
+        - api-gateway
+      networks:
+        - learnmicroservices-network
+
+    ## Prometheus
+  prometheus:
+      image: prom/prometheus:v2.37.1
+      container_name: prometheus
+      restart: always
+      ports:
+        - "9090:9090"
+      volumes:
+        - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      depends_on:
+        - product-service
+      networks:
+        - learnmicroservices-network
+
+  grafana:
+      image: grafana/grafana-oss:8.5.2
+      container_name: grafana
+      restart: always
+      ports:
+        - "3000:3000"
+      links:
+        - prometheus:prometheus
+      volumes:
+        - ./grafana:/var/lib/grafana
+      environment:
+        - GF_SECURITY_ADMIN_USER=admin
+        - GF_SECURITY_ADMIN_PASSWORD=password
+      networks:
+        - learnmicroservices-network
+networks:
+  learnmicroservices-network:
